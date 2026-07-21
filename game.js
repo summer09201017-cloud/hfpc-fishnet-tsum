@@ -30,9 +30,9 @@ var BIGFISH = {id:'big', name:'大魚', c1:'#f0c04c', c2:'#cf9328', wild:true};
 
 // ---------- 年齡三檔(kid-age-modes);target=條數,青少年 153=約21:11 ----------
 var MODES = {
-  young:{ label:'幼幼(4-6)', types:3, minChain:2, target:40,  r:47 },
-  kid:  { label:'兒童(7-11)', types:4, minChain:3, target:100, r:40 },
-  teen: { label:'青少年(12+)', types:6, minChain:3, target:153, r:34 }
+  young:{ label:'幼幼(4-6)', types:3, minChain:2, target:50,  r:47 },
+  kid:  { label:'兒童(7-11)', types:5, minChain:3, target:120, r:38 },
+  teen: { label:'青少年(12+)', types:6, minChain:4, target:153, r:32 }
 };
 var modeKey = 'kid';
 try{ modeKey = localStorage.getItem('fishnet-mode') || 'kid'; }catch(e){}
@@ -57,6 +57,7 @@ try{ muted = localStorage.getItem('fishnet-mute') === '1'; }catch(e){}
 var scene = 'menu';
 var banner = null;
 var hintT = 0, checkT = 0, hintGroup = null;   // 提示/救援(07-21)
+var dbgChecks = 0, dbgRescues = 0;             // 07-22 診斷計數(test 鉤子讀)
 
 function activeTypes(){
   return TYPES.slice(0, M.types);
@@ -110,10 +111,18 @@ function speak(key){
 // ---------- 產生/物理(Verlet 圓) ----------
 function rnd(a,b){ return a + Math.random()*(b-a); }
 function spawnTsum(){
-  var t, r = M.r;
+  var t, r = M.r, anchor = null;
   if (Math.random() < 0.08){ t = BIGFISH; r = M.r*1.3; }   // 大魚:稀有特件
-  else { var ts = activeTypes(); t = ts[(Math.random()*ts.length)|0]; }
-  tsums.push({ x:rnd(r+6, W-r-6), y:PLAY_TOP - rnd(20,140), px:0, py:0, r:r, t:t,
+  else {
+    // 07-22:群聚生成——45% 抄場上隨機一顆的型別、落在它附近,讓 5+ 長鏈自然可達
+    anchor = tsums.length && Math.random() < 0.45 ? tsums[(Math.random()*tsums.length)|0] : null;
+    if (anchor && anchor.t.wild) anchor = null;
+    var ts = activeTypes(); t = anchor ? anchor.t : ts[(Math.random()*ts.length)|0];
+  }
+  // 07-22:一般魚也有大有小(大魚 BIGFISH 固定 1.3× 不動)
+  if (t !== BIGFISH) r = M.r * (Math.random()<0.3 ? 0.78 : rnd(0.92,1.08));
+  var sx = anchor ? Math.max(r+6, Math.min(W-r-6, anchor.x + rnd(-70,70))) : rnd(r+6, W-r-6);
+  tsums.push({ x:sx, y:PLAY_TOP - rnd(20,140), px:0, py:0, r:r, t:t,
                wob:Math.random()*6.28, hi:0 });
   var s = tsums[tsums.length-1]; s.px = s.x; s.py = s.y - rnd(0,2);
 }
@@ -149,7 +158,7 @@ function physics(dt){
 }
 
 // ---------- 連鏈輸入(大魚=百搭:可接進任何一鏈) ----------
-var dragging = false;
+var dragging = false, curP = null, trail = [];
 function chainType(){
   for (var i=0;i<chain.length;i++) if (!chain[i].t.wild) return chain[i].t;
   return null;
@@ -178,12 +187,15 @@ function onDown(e){
   if (scene === 'win'){ winTap(p); return; }
   if (hudTap(p)) return;
   var t = hitTsum(p);
-  if (t){ dragging = true; chain = [t]; t.hi = 1; blip(440, 0.08, 'sine', 0.08); }
+  if (t){ dragging = true; curP = p; trail = [{x:t.x, y:t.y}]; chain = [t]; t.hi = 1; blip(440, 0.08, 'sine', 0.08); }
 }
 function onMove(e){
   if (!dragging || scene!=='play') return;
   e.preventDefault();
   var p = evPos(e), t = hitTsum(p);
+  curP = p;                                   // 07-22:游標徽章位置
+  trail.push({x:p.x, y:p.y});                 // 07-22:滑鼠軌跡(線會轉彎,不是直線)
+  if (trail.length > 60) trail.shift();
   if (!t) return;
   var last = chain[chain.length-1];
   if (t === last) return;
@@ -199,7 +211,7 @@ function onMove(e){
 function onUp(e){
   if (scene!=='play'){ dragging=false; return; }
   if (!dragging) return;
-  dragging = false;
+  dragging = false; curP = null;
   var n = chain.length;
   if (n >= M.minChain) collect(chain.slice());
   for (var i=0;i<chain.length;i++) chain[i].hi = 0;
@@ -208,6 +220,7 @@ function onUp(e){
 cv.addEventListener('pointerdown', onDown);
 cv.addEventListener('pointermove', onMove);
 addEventListener('pointerup', onUp);
+addEventListener('pointercancel', onUp);   // 07-22 修:手機手勢中斷只發 cancel,不接=dragging 卡死→救援全停
 cv.addEventListener('touchstart', function(e){e.preventDefault();}, {passive:false});
 
 // ---------- 收鏈=一網收上船(大魚算 3 條;湖裡照樣有魚,收 n 補 n) ----------
@@ -265,18 +278,33 @@ function findGroup(){
 }
 function rescue(){
   // 無鏈可連的溫柔救援:挑一顆,把離它最近的幾顆變成同款(必產生可連組),火花+橫幅
-  var cands = tsums.filter(function(t){ return !t.t.wild; });
+  // 07-22:只挑「已落定」的球(掉落中的遞色後落地會散,鏈必斷)
+  var cands = tsums.filter(function(t){ return !t.t.wild && Math.abs(t.y - t.py) < 1.5 && t.y > PLAY_TOP; });
   if (cands.length <= M.minChain) return false;
   var seed = cands[(Math.random()*cands.length)|0];
-  var rest = cands.filter(function(t){ return t !== seed; });
-  rest.sort(function(a,b){
-    var da=(a.x-seed.x)*(a.x-seed.x)+(a.y-seed.y)*(a.y-seed.y);
-    var db=(b.x-seed.x)*(b.x-seed.x)+(b.y-seed.y)*(b.y-seed.y);
-    return da-db;
-  });
-  for (var i=0;i<M.minChain-1 && i<rest.length;i++){
-    rest[i].t = seed.t;
-    for (var k=0;k<6;k++) sparks.push({ x:rest[i].x, y:rest[i].y, vx:rnd(-2,2), vy:rnd(-3,1), life:1 });
+  // 07-22 修 v2:沿「實際相鄰」走訪遞色,不搬位置——瞬移進人堆會被物理彈散(minChain≥4 必斷鏈);
+  // 堆裡最近的未用球本來就貼著(~1.0×半徑和<1.35 可連),純換色=物理穩定、必可連
+  var used = [seed], prev = seed;
+  for (var i=0;i<M.minChain-1;i++){
+    var best = null, bd = 1e9;
+    for (var j=0;j<cands.length;j++){
+      var c = cands[j];
+      if (used.indexOf(c) !== -1) continue;
+      var dx=c.x-prev.x, dy=c.y-prev.y, d2=dx*dx+dy*dy;
+      if (d2 < bd){ bd = d2; best = c; }
+    }
+    if (!best) break;
+    var lim = (best.r+prev.r)*1.2;
+    if (bd > lim*lim){
+      // 稀疏場才輕移貼齊 prev(順著原方向,不闖進堆中心)
+      var ang = Math.atan2(best.y-prev.y, best.x-prev.x);
+      best.x = Math.max(best.r, Math.min(W-best.r, prev.x + Math.cos(ang)*(prev.r+best.r)*0.98));
+      best.y = Math.max(PLAY_TOP, Math.min(FLOOR-best.r, prev.y + Math.sin(ang)*(prev.r+best.r)*0.98));
+      best.px = best.x; best.py = best.y;
+    }
+    best.t = seed.t;
+    for (var k=0;k<6;k++) sparks.push({ x:best.x, y:best.y, vx:rnd(-2,2), vy:rnd(-3,1), life:1 });
+    used.push(best); prev = best;
   }
   banner = { text:"✨ 魚群游攏過來了!", t:2.0 };
   blip(659,0.3,'triangle',0.1);
@@ -441,11 +469,25 @@ function drawScene(t){
   ctx.fillStyle = '#c9b98a'; ctx.fillRect(0, FLOOR, W, H-FLOOR); // 湖底沙
 }
 function drawChainLine(){
-  if (chain.length < 2) return;
-  ctx.strokeStyle = 'rgba(255,244,208,.9)'; ctx.lineWidth = 12; ctx.lineCap='round'; ctx.lineJoin='round';
+  // 07-22 修:改畫在 tsum 上層(舊版先畫線再畫球=線被球蓋住看不見),並沿滑鼠軌跡轉彎
+  if (!dragging || chain.length < 1) return;
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255,235,120,.9)'; ctx.lineWidth = 14; ctx.lineCap='round'; ctx.lineJoin='round';
+  ctx.shadowColor = 'rgba(255,240,160,.9)'; ctx.shadowBlur = 10;
   ctx.beginPath(); ctx.moveTo(chain[0].x, chain[0].y);
   for (var i=1;i<chain.length;i++) ctx.lineTo(chain[i].x, chain[i].y);
+  for (i=0;i<trail.length;i++) ctx.lineTo(trail[i].x, trail[i].y);
   ctx.stroke();
+  ctx.strokeStyle = 'rgba(255,255,255,.95)'; ctx.lineWidth = 5; ctx.shadowBlur = 0;
+  ctx.stroke();
+  ctx.restore();
+  // 已選顆數徽章(跟著游標)
+  if (curP && chain.length >= 2){
+    ctx.fillStyle = 'rgba(30,60,38,.9)';
+    ctx.beginPath(); ctx.arc(curP.x, curP.y - 44, 20, 0, 7); ctx.fill();
+    ctx.fillStyle = '#ffe9a8'; ctx.font = 'bold 22px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText(chain.length, curP.x, curP.y - 36);
+  }
 }
 
 // ---------- 開場/勝利畫面 ----------
@@ -565,20 +607,30 @@ function loop(ms){
   // 提示+卡死救援:4 秒沒動作亮提示;場上真的無鏈可連就溫柔聚攏(每秒檢查一次)
   hintT += dt; checkT += dt;
   if (checkT >= 1){
-    checkT = 0;
+    checkT = 0; dbgChecks++;
     if (hintGroup){
-      for (var hi=0;hi<hintGroup.length;hi++) if (tsums.indexOf(hintGroup[hi])===-1){ hintGroup=null; break; }
+      // 07-22:除了「還在場上」也驗「仍彼此可連」——物理擠散的過期提示要放掉,救援才會再補
+      for (var hi=0;hi<hintGroup.length;hi++){
+        var bad = tsums.indexOf(hintGroup[hi])===-1;
+        if (!bad && hi>0){
+          var A=hintGroup[hi-1], B=hintGroup[hi], hdx=B.x-A.x, hdy=B.y-A.y, hlim=(A.r+B.r)*1.35;
+          bad = hdx*hdx+hdy*hdy > hlim*hlim;
+        }
+        if (bad){ hintGroup=null; break; }
+      }
     }
     if (!hintGroup && !dragging){
       var g0 = findGroup();
-      if (!g0 && spawnQueue===0 && flying.length===0){ rescue(); g0 = findGroup(); }
+      // 07-22 修:場滿 CAP 時 spawnQueue 永遠掉不到 0(生成被 tsums.length<CAP 擋)
+      // →舊條件 spawnQueue===0 讓救援永不觸發=死局;場滿就直接放行救援
+      if (!g0 && flying.length===0 && (spawnQueue===0 || tsums.length >= CAP)){ dbgRescues++; rescue(); g0 = findGroup(); }
       if (hintT >= 4 && g0) hintGroup = g0;
     }
   }
   shownFed += (fed - shownFed) * Math.min(1, dt*6);
   drawScene(t);
-  drawChainLine();
   for (var i=0;i<tsums.length;i++) drawTsum(tsums[i]);
+  drawChainLine();   // 07-22:畫在球上層才看得見
   if (hintGroup && !dragging){   // 提示:金色光圈脈動
     ctx.strokeStyle = 'rgba(255,235,140,'+(0.55+0.35*Math.sin(t*6))+')';
     ctx.lineWidth = 5;
@@ -620,7 +672,29 @@ requestAnimationFrame(loop);
 // ---------- 測試鉤子(?test=1 才掛;Playwright 驗證用,不影響玩家) ----------
 if (location.search.indexOf('test=1') !== -1){
   window.__tsum = {
-    state: function(){ return { scene:scene, fed:fed, n:tsums.length, queue:spawnQueue, chains:chainCount, mode:modeKey }; },
+    state: function(){ return { scene:scene, fed:fed, n:tsums.length, queue:spawnQueue, chains:chainCount, mode:modeKey, dragging:dragging, hint:!!hintGroup, checks:dbgChecks, rescues:dbgRescues, chainLen:chain.length }; },
+    deadlock: function(){
+      // 重現 07-22 死局:場滿 CAP+隊列>0+全場無同款相鄰(每顆給獨一無二的假型別)
+      while (tsums.length < CAP) spawnTsum();
+      tsums.length = CAP;
+      for (var i=0;i<tsums.length;i++){
+        var ty = tsums[i].t;
+        tsums[i].t = { id:'zz'+i, kind:ty.kind, name:ty.name, c1:ty.c1, c2:ty.c2 };
+      }
+      spawnQueue = 5; hintT = 5; checkT = 0; hintGroup = null;
+      return { n:tsums.length, queue:spawnQueue, group:findGroup()?1:0 };
+    },
+    row: function(n){
+      // 排一排同款(驗證鏈長無上限):前 n 顆同型等距一列,其餘搬離
+      var ty = tsums[0].t;
+      for (var i=0;i<tsums.length;i++){
+        var c = tsums[i];
+        if (i < n){ c.t = ty; c.x = 40 + i*(c.r*1.6); c.y = FLOOR - c.r; }
+        else { c.y = PLAY_TOP + 10; c.x = W - 30; }
+        c.px = c.x; c.py = c.y;
+      }
+      return { y: FLOOR - tsums[0].r, xs: tsums.slice(0,n).map(function(c){return c.x;}) };
+    },
     start: function(k){ if(k && MODES[k]){ modeKey=k; M=MODES[k]; } startGame(); },
     autoChain: function(){
       // BFS 找一組「同款(含大魚百搭)」相鄰 >= minChain,走正式 collect 路徑
