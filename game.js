@@ -24,15 +24,19 @@ var TYPES = [
   {id:'f2', name:'橘紅魚', c1:'#e8945a', c2:'#c46e34'},
   {id:'f3', name:'紫魚',   c1:'#a98ad0', c2:'#8365ab'},
   {id:'f4', name:'黃魚',   c1:'#e8c85a', c2:'#c4a034'},
-  {id:'f5', name:'銀白魚', c1:'#ccd8e0', c2:'#a2b2be'}
+  {id:'f5', name:'銀白魚', c1:'#ccd8e0', c2:'#a2b2be'},
+  // 07-22 擴充:更多魚種(使用者點名),一樣「顏色拉開+形狀記號」
+  {id:'f6', name:'粉紋魚', c1:'#e08aa8', c2:'#b86484', stripes:true},
+  {id:'f7', name:'青斑魚', c1:'#6cc5b8', c2:'#459a8e', dots:true},
+  {id:'f8', name:'可可魚', c1:'#a87848', c2:'#7e5426', band:true}
 ];
 var BIGFISH = {id:'big', name:'大魚', c1:'#f0c04c', c2:'#cf9328', wild:true};
 
 // ---------- 年齡三檔(kid-age-modes);target=條數,青少年 153=約21:11 ----------
 var MODES = {
   young:{ label:'幼幼(4-6)', types:3, minChain:2, target:50,  r:47 },
-  kid:  { label:'兒童(7-11)', types:5, minChain:3, target:120, r:38 },
-  teen: { label:'青少年(12+)', types:6, minChain:4, target:153, r:32 }
+  kid:  { label:'兒童(7-11)', types:6, minChain:3, target:130, r:38 },
+  teen: { label:'青少年(12+)', types:9, minChain:4, target:153, r:32 }
 };
 var modeKey = 'kid';
 try{ modeKey = localStorage.getItem('fishnet-mode') || 'kid'; }catch(e){}
@@ -115,7 +119,7 @@ function spawnTsum(){
   if (Math.random() < 0.08){ t = BIGFISH; r = M.r*1.3; }   // 大魚:稀有特件
   else {
     // 07-22:群聚生成——45% 抄場上隨機一顆的型別、落在它附近,讓 5+ 長鏈自然可達
-    anchor = tsums.length && Math.random() < 0.45 ? tsums[(Math.random()*tsums.length)|0] : null;
+    anchor = playing && tsums.length && Math.random() < 0.45 ? tsums[(Math.random()*tsums.length)|0] : null;   // 07-22:開場鋪場不群聚(滾雪球整片同色)
     if (anchor && anchor.t.wild) anchor = null;
     var ts = activeTypes(); t = anchor ? anchor.t : ts[(Math.random()*ts.length)|0];
   }
@@ -367,6 +371,23 @@ function drawTsum(t, xx, yy, rr){
   ctx.beginPath(); ctx.arc(x, y, r*0.95, -2.4, -0.7); ctx.lineTo(x, y-r*0.4); ctx.closePath(); ctx.fill();
   ctx.fillStyle = 'rgba(255,255,255,.3)'; // 肚
   ctx.beginPath(); ctx.arc(x-r*0.25, y+r*0.35, r*0.4, 0.3, 2.8); ctx.fill();
+  if (ty.stripes){                       // 粉紋魚:三道直紋
+    ctx.strokeStyle = 'rgba(90,35,60,.4)'; ctx.lineWidth = r*0.12; ctx.lineCap='round';
+    for (var si=0; si<3; si++){
+      ctx.beginPath(); ctx.arc(x-r*0.45+si*r*0.38, y, r*0.6, -1.1, 1.1); ctx.stroke();
+    }
+  }
+  if (ty.dots){                          // 青斑魚:深斑點
+    ctx.fillStyle = 'rgba(20,70,62,.5)';
+    var dps = [[-0.35,-0.25],[0.15,-0.4],[0.28,0.18],[-0.12,0.35]];
+    for (var di=0; di<dps.length; di++){
+      ctx.beginPath(); ctx.arc(x+dps[di][0]*r, y+dps[di][1]*r, r*0.1, 0, 7); ctx.fill();
+    }
+  }
+  if (ty.band){                          // 可可魚:白色頭帶紋
+    ctx.strokeStyle = 'rgba(255,255,255,.8)'; ctx.lineWidth = r*0.16;
+    ctx.beginPath(); ctx.arc(x, y, r*0.78, -2.7, -1.5); ctx.stroke();
+  }
   if (ty.wild){                          // 大魚:金冠光環,一眼認得
     ctx.strokeStyle = 'rgba(255,240,170,.9)'; ctx.lineWidth = r*0.1;
     ctx.beginPath(); ctx.arc(x, y, r*1.05, 0, 7); ctx.stroke();
