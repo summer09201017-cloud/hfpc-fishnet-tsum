@@ -1,0 +1,583 @@
+/* 一網滿滿的魚 —— tsum 連鏈版(物理堆疊+劃線連同款)
+ * 反向化鑰匙:連線不是「消滅」,是「串成一網收上船」——照主的話下網就必得著(約21:6),
+ * 網滿了大魚共一百五十三條,網卻沒有破(約21:11)。大魚=金色特件,可接進任何一鏈、算 3 條。
+ * 經文:約21:6 / 21:11(和合本,已 cuv 查驗)。
+ * 零相依、可離線、手機直向友善。榮耀歸神。
+ */
+(function(){
+'use strict';
+var W = 540, H = 960;
+var cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+cv.width = W; cv.height = H;
+
+// ---------- letterbox fit ----------
+function fit(){
+  var vw = innerWidth, vh = innerHeight, s = Math.min(vw/W, vh/H);
+  cv.style.width = (W*s)+'px'; cv.style.height = (H*s)+'px';
+}
+addEventListener('resize', fit); fit();
+
+// ---------- tsum 圖鑑:六種魚+金色大魚(約21:11 網滿了「大魚」) ----------
+var TYPES = [
+  {id:'f0', name:'藍魚',   c1:'#5aa7d8', c2:'#3f83b3'},
+  {id:'f1', name:'銀綠魚', c1:'#7cc39a', c2:'#569c74'},
+  {id:'f2', name:'橘紅魚', c1:'#e8945a', c2:'#c46e34'},
+  {id:'f3', name:'紫魚',   c1:'#a98ad0', c2:'#8365ab'},
+  {id:'f4', name:'黃魚',   c1:'#e8c85a', c2:'#c4a034'},
+  {id:'f5', name:'銀白魚', c1:'#ccd8e0', c2:'#a2b2be'}
+];
+var BIGFISH = {id:'big', name:'大魚', c1:'#f0c04c', c2:'#cf9328', wild:true};
+
+// ---------- 年齡三檔(kid-age-modes);target=條數,青少年 153=約21:11 ----------
+var MODES = {
+  young:{ label:'幼幼(4-6)', types:3, minChain:2, target:40,  r:47 },
+  kid:  { label:'兒童(7-11)', types:4, minChain:3, target:100, r:40 },
+  teen: { label:'青少年(12+)', types:6, minChain:3, target:153, r:34 }
+};
+var modeKey = 'kid';
+try{ modeKey = localStorage.getItem('fishnet-mode') || 'kid'; }catch(e){}
+if(!MODES[modeKey]) modeKey = 'kid';
+var M = MODES[modeKey];
+
+// ---------- 版面 ----------
+var CROWD_TOP = 64, CROWD_H = 150;           // 上方湖面+船(彼得和門徒)
+var PLAY_TOP = CROWD_TOP + CROWD_H + 8;      // 堆疊區頂(水下)
+var FLOOR = H - 26;                          // 湖底
+
+// ---------- 狀態 ----------
+var tsums = [], chain = [], flying = [], sparks = [];
+var fed = 0, shownFed = 0, chainCount = 0, playing = false, won = false;
+var startTime = 0, doneSent = false;
+var blessT = 0;          // >0 = 「撒在船的右邊」時刻(加倍)剩餘秒
+var nextBlessAt = 6;
+var spawnQueue = 0, spawnTick = 0;
+var CAP = 46;
+var muted = false;
+try{ muted = localStorage.getItem('fishnet-mute') === '1'; }catch(e){}
+var scene = 'menu';
+var banner = null;
+
+function activeTypes(){
+  return TYPES.slice(0, M.types);
+}
+
+// ---------- 音效/BGM(零檔案 WebAudio) ----------
+var AC = null;
+function ac(){ if(!AC){ try{ AC = new (window.AudioContext||window.webkitAudioContext)(); }catch(e){} } return AC; }
+function blip(f, dur, type, vol){
+  if (muted) return; var a = ac(); if(!a) return;
+  try{
+    var o = a.createOscillator(), g = a.createGain();
+    o.type = type||'sine'; o.frequency.value = f;
+    g.gain.setValueAtTime((vol||0.12), a.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.0001, a.currentTime + (dur||0.15));
+    o.connect(g); g.connect(a.destination); o.start(); o.stop(a.currentTime + (dur||0.15) + 0.02);
+  }catch(e){}
+}
+function chordCollect(n){
+  var base = 392;
+  [0,4,7, n>=5?12:null].forEach(function(st,i){
+    if(st===null) return;
+    setTimeout(function(){ blip(base*Math.pow(2,st/12), 0.25, 'triangle', 0.1); }, i*40);
+  });
+}
+// 加利利湖清晨 BGM(每關不同曲——水波搖曳的三拍子感)
+var bgmTimer = null, bgmStep = 0;
+var MELO = [330,392,440,523, 440,392,330,294, 330,440,523,587, 523,440,392,330];
+var BASS = [110,110,147,147, 131,131,110,110, 147,147,165,165, 131,131,110,110];
+function bgmTick(){
+  if (muted || scene !== 'play') return;
+  var i = bgmStep % 16;
+  blip(BASS[i], 0.26, 'sine', 0.05);
+  if (bgmStep % 2 === 0) blip(MELO[(bgmStep/2)%16|0], 0.22, 'triangle', 0.04);
+  bgmStep++;
+}
+function bgmStart(){ if (bgmTimer) return; bgmTimer = setInterval(bgmTick, 280); }
+
+// ---------- 曉臻預烤語音(mp3 有就播,沒有就靜默,絕不機器聲) ----------
+var VOICES = { intro:'voice/intro.mp3', bless:'voice/bless.mp3', win:'voice/win.mp3' };
+var voiceEl = null, blessSpoken = false;
+function speak(key){
+  if (muted) return;
+  try{
+    if (voiceEl){ voiceEl.pause(); }
+    voiceEl = new Audio(VOICES[key]);
+    voiceEl.volume = 1; voiceEl.play().catch(function(){});
+  }catch(e){}
+}
+
+// ---------- 產生/物理(Verlet 圓) ----------
+function rnd(a,b){ return a + Math.random()*(b-a); }
+function spawnTsum(){
+  var t, r = M.r;
+  if (Math.random() < 0.08){ t = BIGFISH; r = M.r*1.3; }   // 大魚:稀有特件
+  else { var ts = activeTypes(); t = ts[(Math.random()*ts.length)|0]; }
+  tsums.push({ x:rnd(r+6, W-r-6), y:PLAY_TOP - rnd(20,140), px:0, py:0, r:r, t:t,
+               wob:Math.random()*6.28, hi:0 });
+  var s = tsums[tsums.length-1]; s.px = s.x; s.py = s.y - rnd(0,2);
+}
+function physics(dt){
+  var i, j, a, b;
+  for (i=0;i<tsums.length;i++){
+    a = tsums[i];
+    var vx = (a.x - a.px)*0.99, vy = (a.y - a.py)*0.99;
+    a.px = a.x; a.py = a.y;
+    a.x += vx; a.y += vy + 0.42;
+  }
+  for (var it=0; it<3; it++){
+    for (i=0;i<tsums.length;i++){
+      a = tsums[i];
+      if (a.x < a.r) a.x = a.r;
+      if (a.x > W-a.r) a.x = W-a.r;
+      if (a.y > FLOOR - a.r) a.y = FLOOR - a.r;
+      if (a.y < -200) a.y = -200;
+    }
+    for (i=0;i<tsums.length;i++){
+      for (j=i+1;j<tsums.length;j++){
+        a = tsums[i]; b = tsums[j];
+        var dx = b.x-a.x, dy = b.y-a.y, rr = a.r+b.r;
+        if (Math.abs(dx)>rr || Math.abs(dy)>rr) continue;
+        var d2 = dx*dx+dy*dy;
+        if (d2 >= rr*rr || d2 === 0) continue;
+        var d = Math.sqrt(d2), push = (rr-d)/d*0.5;
+        dx*=push; dy*=push;
+        a.x-=dx; a.y-=dy; b.x+=dx; b.y+=dy;
+      }
+    }
+  }
+}
+
+// ---------- 連鏈輸入(大魚=百搭:可接進任何一鏈) ----------
+var dragging = false;
+function chainType(){
+  for (var i=0;i<chain.length;i++) if (!chain[i].t.wild) return chain[i].t;
+  return null;
+}
+function canLink(t){
+  var ct = chainType();
+  return t.t.wild || !ct || t.t === ct;
+}
+function evPos(e){
+  var r = cv.getBoundingClientRect();
+  var p = (e.touches && e.touches[0]) || e;
+  return { x:(p.clientX-r.left)/r.width*W, y:(p.clientY-r.top)/r.height*H };
+}
+function hitTsum(p){
+  for (var i=tsums.length-1;i>=0;i--){
+    var t = tsums[i], dx = p.x-t.x, dy = p.y-t.y;
+    if (dx*dx+dy*dy < t.r*t.r*1.1) return t;
+  }
+  return null;
+}
+function onDown(e){
+  e.preventDefault();
+  var p = evPos(e);
+  if (scene === 'menu'){ menuTap(p); return; }
+  if (scene === 'win'){ winTap(p); return; }
+  if (hudTap(p)) return;
+  var t = hitTsum(p);
+  if (t){ dragging = true; chain = [t]; t.hi = 1; blip(440, 0.08, 'sine', 0.08); }
+}
+function onMove(e){
+  if (!dragging || scene!=='play') return;
+  e.preventDefault();
+  var p = evPos(e), t = hitTsum(p);
+  if (!t) return;
+  var last = chain[chain.length-1];
+  if (t === last) return;
+  var prev = chain[chain.length-2];
+  if (t === prev){ last.hi = 0; chain.pop(); blip(330,0.06,'sine',0.06); return; } // 回滑取消
+  if (chain.indexOf(t) !== -1) return;
+  if (!canLink(t)) return;
+  var dx = t.x-last.x, dy = t.y-last.y, lim = (t.r+last.r)*1.35;
+  if (dx*dx+dy*dy > lim*lim) return;
+  chain.push(t); t.hi = 1;
+  blip(440*Math.pow(2, Math.min(chain.length,12)/12), 0.08, 'sine', 0.09);
+}
+function onUp(e){
+  if (scene!=='play'){ dragging=false; return; }
+  if (!dragging) return;
+  dragging = false;
+  var n = chain.length;
+  if (n >= M.minChain) collect(chain.slice());
+  for (var i=0;i<chain.length;i++) chain[i].hi = 0;
+  chain = [];
+}
+cv.addEventListener('pointerdown', onDown);
+cv.addEventListener('pointermove', onMove);
+addEventListener('pointerup', onUp);
+cv.addEventListener('touchstart', function(e){e.preventDefault();}, {passive:false});
+
+// ---------- 收鏈=一網收上船(大魚算 3 條;湖裡照樣有魚,收 n 補 n) ----------
+function collect(list){
+  var n = list.length, count = 0;
+  for (var i=0;i<n;i++) count += list[i].t.wild ? 3 : 1;
+  var mult = (n>=8?3 : n>=5?2 : 1) * (blessT>0?2:1);
+  var caught = count * mult;
+  fed = Math.min(M.target, fed + caught);
+  chainCount++;
+  chordCollect(n);
+  for (i=0;i<n;i++){
+    var t = list[i], idx = tsums.indexOf(t);
+    if (idx !== -1) tsums.splice(idx,1);
+    flying.push({ x:t.x, y:t.y, r:t.r, t:t.t, tx:rnd(W*0.3,W*0.7), ty:CROWD_TOP+CROWD_H*0.52, p:0, d:i*0.05 });
+  }
+  for (i=0;i<10+n*2;i++) sparks.push({ x:list[0].x, y:list[0].y, vx:rnd(-3,3), vy:rnd(-4,1), life:1 });
+  spawnQueue += n;                          // 湖裡照主的話滿是魚:收 n 補 n
+  banner = { text: n>=5 ? ('好滿的一網!收上 '+caught+' 條') : ('一網收上 '+caught+' 條'), t:1.4 };
+  if (chainCount >= nextBlessAt && blessT<=0){
+    blessT = 8; nextBlessAt += (modeKey==='teen'?9:7);
+    banner = { text:'✨ 撒在船的右邊——就必得著!', t:2.4 };
+    blip(784,0.4,'triangle',0.12); blip(988,0.5,'triangle',0.1);
+    if (!blessSpoken){ blessSpoken = true; speak('bless'); }
+  }
+  if (fed >= M.target && !won){
+    won = true; scene = 'win'; speak('win');
+    if (!doneSent){ doneSent = true;
+      if (window.__ping) window.__ping('fishnet-tsum-done', Math.round((Date.now()-startTime)/1000)); }
+  }
+}
+
+// ---------- 畫圖 ----------
+function roundRect(x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r);
+  ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+
+// 立體感三件套:色彩混合 + 球面漸層 + 高光/接地影(canvas 2D 假 3D,零相依)
+function hex2rgb(h){ return [parseInt(h.slice(1,3),16), parseInt(h.slice(3,5),16), parseInt(h.slice(5,7),16)]; }
+function mixc(h, f){
+  var c = hex2rgb(h), t = f>0 ? 255 : 0, a = Math.abs(f);
+  return 'rgb('+Math.round(c[0]+(t-c[0])*a)+','+Math.round(c[1]+(t-c[1])*a)+','+Math.round(c[2]+(t-c[2])*a)+')';
+}
+function ballGrad(x, y, r, c1, c2){
+  var g = ctx.createRadialGradient(x - r*0.35, y - r*0.45, r*0.12, x, y, r*1.02);
+  g.addColorStop(0, mixc(c1, 0.55));
+  g.addColorStop(0.45, c1);
+  g.addColorStop(1, mixc(c2, -0.22));
+  return g;
+}
+function ballHighlight(x, y, r){
+  ctx.fillStyle = 'rgba(255,255,255,.45)';
+  ctx.beginPath(); ctx.ellipse(x - r*0.34, y - r*0.44, r*0.24, r*0.13, -0.55, 0, 7); ctx.fill();
+}
+function groundShadow(x, y, r){
+  ctx.fillStyle = 'rgba(15,45,70,.2)';
+  ctx.beginPath(); ctx.ellipse(x, y + r*0.86, r*0.78, r*0.2, 0, 0, 7); ctx.fill();
+}
+
+function drawFace(x,y,r,happy,dark){
+  var fc = dark || '#1a2a38';
+  ctx.fillStyle = fc;
+  ctx.beginPath(); ctx.arc(x-r*0.28, y-r*0.08, r*0.085, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(x+r*0.28, y-r*0.08, r*0.085, 0, 7); ctx.fill();
+  ctx.strokeStyle = fc; ctx.lineWidth = Math.max(2, r*0.07); ctx.lineCap='round';
+  ctx.beginPath(); ctx.arc(x, y+r*0.14, r*0.24, 0.25, Math.PI-0.25); ctx.stroke();
+  if (happy){
+    ctx.fillStyle = 'rgba(240,120,120,.45)';
+    ctx.beginPath(); ctx.arc(x-r*0.5, y+r*0.1, r*0.12, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.arc(x+r*0.5, y+r*0.1, r*0.12, 0, 7); ctx.fill();
+  }
+}
+function drawTsum(t, xx, yy, rr){
+  var x = xx!==undefined?xx:t.x, y = yy!==undefined?yy:t.y, r = (rr!==undefined?rr:t.r) * (t.hi? 1.13:1);
+  var ty = t.t;
+  ctx.save();
+  groundShadow(x, y, r);
+  if (t.hi){ ctx.shadowColor = '#fff'; ctx.shadowBlur = 14; }
+  // 魚:圓身+尾鰭+背鰭,球面漸層立體感,每條都有臉
+  ctx.fillStyle = mixc(ty.c2, -0.1);
+  ctx.beginPath();               // 尾鰭
+  ctx.moveTo(x+r*0.75, y);
+  ctx.lineTo(x+r*1.25, y-r*0.5); ctx.lineTo(x+r*1.25, y+r*0.5); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = ballGrad(x, y, r*0.95, ty.c1, ty.c2);
+  ctx.beginPath(); ctx.arc(x, y, r*0.95, 0, 7); ctx.fill();
+  ctx.fillStyle = mixc(ty.c2, -0.05);   // 背鰭
+  ctx.beginPath(); ctx.arc(x, y, r*0.95, -2.4, -0.7); ctx.lineTo(x, y-r*0.4); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,.3)'; // 肚
+  ctx.beginPath(); ctx.arc(x-r*0.25, y+r*0.35, r*0.4, 0.3, 2.8); ctx.fill();
+  if (ty.wild){                          // 大魚:金冠光環,一眼認得
+    ctx.strokeStyle = 'rgba(255,240,170,.9)'; ctx.lineWidth = r*0.1;
+    ctx.beginPath(); ctx.arc(x, y, r*1.05, 0, 7); ctx.stroke();
+    ctx.fillStyle = '#fff3c4';
+    ctx.beginPath();
+    ctx.moveTo(x-r*0.3, y-r*0.85); ctx.lineTo(x-r*0.15, y-r*1.1); ctx.lineTo(x, y-r*0.9);
+    ctx.lineTo(x+r*0.15, y-r*1.1); ctx.lineTo(x+r*0.3, y-r*0.85); ctx.closePath(); ctx.fill();
+  }
+  ballHighlight(x, y, r*0.95);
+  drawFace(x-r*0.15, y-r*0.05, r*0.9, t.hi, ty.wild?'#6a4a10':null);
+  ctx.restore();
+}
+// 船上門徒(有臉),收魚比例越高越多人舉手歡呼
+function drawDisciple(x, y, s, i, t){
+  var happyN = Math.floor((fed/M.target)*BOAT_N);
+  var happy = i < happyN;
+  var bob = Math.sin(t*2 + i)*1.5 + (happy ? Math.sin(t*5+i)*1.5 : 0);
+  ctx.fillStyle = ['#b3733f','#7a8a4a','#8a5a7a','#5a7a9c'][i%4];
+  ctx.beginPath(); ctx.arc(x, y - 6*s + bob*0.3, 7*s, Math.PI, 0); ctx.fill();
+  ctx.fillRect(x-7*s, y-6*s+bob*0.3, 14*s, 7*s);
+  ctx.fillStyle = '#f2c9a0';
+  ctx.beginPath(); ctx.arc(x, y-13*s + bob, 5.2*s, 0, 7); ctx.fill();
+  ctx.fillStyle = '#4a3020';
+  ctx.beginPath(); ctx.arc(x, y-16*s + bob, 5*s, Math.PI*1.05, Math.PI*1.95); ctx.fill(); // 髮(耳前無髮)
+  ctx.fillStyle = '#2a1a10';
+  ctx.beginPath(); ctx.arc(x-1.8*s, y-13.5*s+bob, 0.7*s, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(x+1.8*s, y-13.5*s+bob, 0.7*s, 0, 7); ctx.fill();
+  ctx.strokeStyle = '#2a1a10'; ctx.lineWidth = 0.8*s;
+  ctx.beginPath(); ctx.arc(x, y-11.8*s+bob, 1.6*s, 0.3, Math.PI-0.3); ctx.stroke();
+  if (happy){ // 舉手歡呼
+    ctx.strokeStyle = '#f2c9a0'; ctx.lineWidth = 2*s; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(x-6*s, y-6*s); ctx.lineTo(x-9*s, y-16*s-bob); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x+6*s, y-6*s); ctx.lineTo(x+9*s, y-16*s-bob); ctx.stroke();
+  } else { // 拉網
+    ctx.strokeStyle = '#f2c9a0'; ctx.lineWidth = 2*s; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(x-6*s, y-6*s); ctx.lineTo(x-10*s, y-1*s); ctx.stroke();
+  }
+}
+var BOAT_N = 4;
+
+function drawHUD(){
+  ctx.fillStyle = '#1e4668';
+  ctx.fillRect(0,0,W,CROWD_TOP);
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 26px "Microsoft JhengHei",sans-serif'; ctx.textAlign='center';
+  ctx.fillText('已收 ' + Math.round(shownFed) + ' / ' + M.target + ' 條魚', W/2, 40);
+  ctx.font = '20px sans-serif'; ctx.textAlign='left';
+  ctx.fillStyle = 'rgba(255,255,255,.85)'; ctx.fillText('← 大廳', 12, 38);
+  ctx.textAlign='right';
+  ctx.fillText(muted?'🔇':'🔊', W-14, 38);
+  ctx.fillStyle = 'rgba(0,0,0,.3)'; roundRect(80, 48, W-160, 10, 5); ctx.fill();
+  ctx.fillStyle = blessT>0 ? '#ffd54a' : '#8fd0f0';
+  var w = Math.max(10,(W-160)*Math.min(1, shownFed/M.target));
+  roundRect(80, 48, w, 10, 5); ctx.fill();
+}
+function hudTap(p){
+  if (p.y < CROWD_TOP){
+    if (p.x < 100){ location.href = 'https://hfpc-bible-games.netlify.app/'; return true; }
+    if (p.x > W-100){ muted = !muted; try{ localStorage.setItem('fishnet-mute', muted?'1':'0'); }catch(e){} return true; }
+  }
+  return false;
+}
+
+function drawScene(t){
+  // 加利利湖清晨:天將亮的粉金天色(約21:4)
+  var g = ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,'#f4cfa0'); g.addColorStop(0.22,'#a8cce0');
+  g.addColorStop(0.5,'#6ab2dc'); g.addColorStop(1,'#3f83b3');
+  ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
+  // 湖面帶+船
+  ctx.fillStyle = '#7fbede';
+  ctx.fillRect(0, CROWD_TOP, W, CROWD_H);
+  ctx.fillStyle = 'rgba(255,255,255,.35)';
+  for (var i=0;i<4;i++){ ctx.beginPath();
+    ctx.ellipse(70+i*140 + Math.sin(t*0.8+i)*12, CROWD_TOP+18+((i%2)*10), 36,4, 0,0,7); ctx.fill(); }
+  // 木船
+  var bx = W/2, by = CROWD_TOP + CROWD_H*0.72;
+  ctx.fillStyle = '#8a5f38';
+  ctx.beginPath(); ctx.moveTo(bx-150, by-28); ctx.lineTo(bx+150, by-28);
+  ctx.lineTo(bx+112, by+22); ctx.lineTo(bx-112, by+22); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#a8764a';
+  ctx.fillRect(bx-150, by-32, 300, 8);
+  ctx.strokeStyle = '#6a4526'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(bx-40, by-32); ctx.lineTo(bx-40, by-92); ctx.stroke(); // 桅杆
+  ctx.fillStyle = '#f2ead0';
+  ctx.beginPath(); ctx.moveTo(bx-37, by-88); ctx.lineTo(bx+42, by-60); ctx.lineTo(bx-37, by-46); ctx.closePath(); ctx.fill();
+  // 船上收成的魚堆(進度看得見)
+  var pile = Math.floor((fed/M.target)*10);
+  for (i=0;i<pile;i++){
+    var px = bx - 80 + (i%5)*40, py = by - 6 - ((i/5)|0)*10;
+    ctx.fillStyle = ['#5aa7d8','#7cc39a','#e8945a','#e8c85a','#a98ad0'][i%5];
+    ctx.beginPath(); ctx.ellipse(px, py, 13, 8, 0, 0, 7); ctx.fill();
+  }
+  // 門徒
+  for (i=0;i<BOAT_N;i++) drawDisciple(bx-96+i*64, by-30, 1, i, t);
+  // 水下堆疊區
+  ctx.fillStyle = 'rgba(120,190,225,.5)';
+  ctx.fillRect(0, PLAY_TOP-6, W, FLOOR-PLAY_TOP+40);
+  ctx.fillStyle = 'rgba(255,255,255,.14)';
+  for (i=0;i<5;i++) ctx.fillRect(0, PLAY_TOP+ i*(FLOOR-PLAY_TOP)/5, W, 2);
+  ctx.fillStyle = '#c9b98a'; ctx.fillRect(0, FLOOR, W, H-FLOOR); // 湖底沙
+}
+function drawChainLine(){
+  if (chain.length < 2) return;
+  ctx.strokeStyle = 'rgba(255,244,208,.9)'; ctx.lineWidth = 12; ctx.lineCap='round'; ctx.lineJoin='round';
+  ctx.beginPath(); ctx.moveTo(chain[0].x, chain[0].y);
+  for (var i=1;i<chain.length;i++) ctx.lineTo(chain[i].x, chain[i].y);
+  ctx.stroke();
+}
+
+// ---------- 開場/勝利畫面 ----------
+var menuBtns = [];
+function drawMenu(t){
+  drawScene(t);
+  ctx.fillStyle = 'rgba(10,35,55,.82)'; ctx.fillRect(0,0,W,H);
+  ctx.textAlign='center'; ctx.fillStyle = '#ffe9a8';
+  ctx.font = 'bold 52px "Microsoft JhengHei",sans-serif';
+  ctx.fillText('一網滿滿的魚', W/2, 190);
+  ctx.font = 'bold 30px "Microsoft JhengHei",sans-serif';
+  ctx.fillText('網 卻 沒 有 破', W/2, 245);
+  var demo = [TYPES[0], TYPES[2], BIGFISH, TYPES[1], TYPES[4]];
+  for (var i=0;i<5;i++) drawTsum({t:demo[i], hi:0}, 90+i*90, 330 + Math.sin(t*2+i)*8, 34);
+  ctx.fillStyle = '#fff'; ctx.font = '22px "Microsoft JhengHei",sans-serif';
+  ctx.fillText('「耶穌說:你們把網撒在船的右邊,', W/2, 420);
+  ctx.fillText('就必得著。」(約21:6)', W/2, 452);
+  ctx.font = '24px "Microsoft JhengHei",sans-serif'; ctx.fillStyle = '#cfe6f2';
+  ctx.fillText('劃線把同種魚串成一網收上船', W/2, 510);
+  ctx.fillText('金色大魚是百搭,一條算三條!', W/2, 544);
+  menuBtns = [];
+  var keys = ['young','kid','teen'];
+  for (i=0;i<3;i++){
+    var y = 610 + i*92, sel = keys[i]===modeKey;
+    ctx.fillStyle = sel ? '#ffd54a' : 'rgba(255,255,255,.14)';
+    roundRect(W/2-170, y, 340, 72, 18); ctx.fill();
+    ctx.fillStyle = sel ? '#4a3510' : '#fff';
+    ctx.font = 'bold 30px "Microsoft JhengHei",sans-serif';
+    ctx.fillText(MODES[keys[i]].label + '・收滿 ' + MODES[keys[i]].target + ' 條', W/2, y+46);
+    menuBtns.push({ x:W/2-170, y:y, w:340, h:72, key:keys[i] });
+  }
+  ctx.fillStyle = '#b8dcf0'; ctx.font = '20px sans-serif';
+  ctx.fillText('點一個年齡檔就開始 ▶', W/2, 910);
+}
+function menuTap(p){
+  for (var i=0;i<menuBtns.length;i++){
+    var b = menuBtns[i];
+    if (p.x>b.x && p.x<b.x+b.w && p.y>b.y && p.y<b.y+b.h){
+      modeKey = b.key; M = MODES[modeKey];
+      try{ localStorage.setItem('fishnet-mode', modeKey); }catch(e){}
+      startGame(); return;
+    }
+  }
+}
+function startGame(){
+  tsums = []; chain = []; flying = []; sparks = [];
+  fed = 0; shownFed = 0; chainCount = 0; won = false; blessT = 0; blessSpoken = false;
+  nextBlessAt = modeKey==='young' ? 4 : 6;
+  spawnQueue = 0; doneSent = false;
+  var n = Math.min(CAP-6, Math.floor((W-20)/(2*M.r)) * 6);
+  for (var i=0;i<n;i++) spawnTsum();
+  scene = 'play'; playing = true; startTime = Date.now();
+  ac(); bgmStart(); speak('intro');
+  if (window.__ping) window.__ping('fishnet-tsum-start');
+}
+var winBtns = [];
+function drawWin(t){
+  drawScene(t);
+  for (var i=0;i<tsums.length;i++) drawTsum(tsums[i]);
+  ctx.fillStyle = 'rgba(10,35,55,.88)'; ctx.fillRect(0,0,W,H);
+  ctx.textAlign='center';
+  ctx.fillStyle = '#ffe9a8'; ctx.font = 'bold 44px "Microsoft JhengHei",sans-serif';
+  ctx.fillText('🎉 網拉到岸上了!', W/2, 170);
+  // 岸邊的大網+滿滿的魚
+  var nx = W/2, ny = 262;
+  ctx.strokeStyle = 'rgba(255,244,208,.75)'; ctx.lineWidth = 2;
+  for (i=0;i<7;i++){ ctx.beginPath(); ctx.moveTo(nx-140+i*47, ny-34); ctx.lineTo(nx-120+i*40, ny+38); ctx.stroke(); }
+  for (i=0;i<4;i++){ ctx.beginPath(); ctx.moveTo(nx-146, ny-30+i*22); ctx.quadraticCurveTo(nx, ny-16+i*22, nx+146, ny-30+i*22); ctx.stroke(); }
+  for (i=0;i<12;i++){
+    var fx = nx - 120 + (i%6)*48, fy = ny - 12 + ((i/6)|0)*30, fill = Math.min(1, Math.max(0, (t*4 - i*0.25)));
+    if (fill <= 0.2) continue;
+    ctx.fillStyle = ['#5aa7d8','#7cc39a','#e8945a','#e8c85a','#a98ad0','#f0c04c'][i%6];
+    ctx.beginPath(); ctx.ellipse(fx, fy, 16, 10, (i%3-1)*0.3, 0, 7); ctx.fill();
+  }
+  ctx.fillStyle = '#fff'; ctx.font = '23px "Microsoft JhengHei",sans-serif';
+  var L = ['「西門彼得就去,把網拉到岸上。','那網滿了大魚,共一百五十三條;','魚雖這樣多,網卻沒有破。」','(約翰福音 21:11)'];
+  for (i=0;i<L.length;i++) ctx.fillText(L[i], W/2, 360 + i*40);
+  ctx.fillStyle = '#cfe6f2'; ctx.font = '22px "Microsoft JhengHei",sans-serif';
+  ctx.fillText('主吩咐在哪裡下網,就在哪裡得著——', W/2, 570);
+  ctx.fillText('聽祂的話,空了一夜的網也能滿滿。', W/2, 604);
+  winBtns = [];
+  var items = [['🔊 再聽經文','listen'],['再玩一次','again'],['← 回大廳','lobby']];
+  for (i=0;i<3;i++){
+    var y = 690 + i*84;
+    ctx.fillStyle = 'rgba(255,255,255,.15)'; roundRect(W/2-160, y, 320, 66, 16); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 27px "Microsoft JhengHei",sans-serif';
+    ctx.fillText(items[i][0], W/2, y+43);
+    winBtns.push({ x:W/2-160, y:y, w:320, h:66, act:items[i][1] });
+  }
+}
+function winTap(p){
+  for (var i=0;i<winBtns.length;i++){
+    var b = winBtns[i];
+    if (p.x>b.x && p.x<b.x+b.w && p.y>b.y && p.y<b.y+b.h){
+      if (b.act==='listen') speak('win');
+      else if (b.act==='again') scene = 'menu';
+      else location.href = 'https://hfpc-bible-games.netlify.app/';
+      return;
+    }
+  }
+}
+
+// ---------- 主迴圈 ----------
+var last = 0, winT = 0;
+function loop(ms){
+  requestAnimationFrame(loop);
+  var t = ms/1000, dt = Math.min(0.05, t-last); last = t;
+  if (scene === 'menu'){ drawMenu(t); return; }
+  if (scene === 'win'){ winT += dt; drawWin(winT); return; }
+  if (blessT > 0) blessT -= dt;
+  spawnTick -= dt;
+  if (spawnQueue > 0 && spawnTick <= 0 && tsums.length < CAP){
+    spawnTsum(); spawnQueue--; spawnTick = 0.12;
+  }
+  physics(dt);
+  shownFed += (fed - shownFed) * Math.min(1, dt*6);
+  drawScene(t);
+  drawChainLine();
+  for (var i=0;i<tsums.length;i++) drawTsum(tsums[i]);
+  // 飛向船的魚
+  for (i=flying.length-1;i>=0;i--){
+    var f = flying[i];
+    if (f.d > 0){ f.d -= dt; drawTsum({t:f.t,hi:0}, f.x, f.y, f.r); continue; }
+    f.p += dt*2.4;
+    if (f.p >= 1){ flying.splice(i,1); continue; }
+    var e = 1-(1-f.p)*(1-f.p);
+    drawTsum({t:f.t,hi:0}, f.x+(f.tx-f.x)*e, f.y+(f.ty-f.y)*e - Math.sin(e*Math.PI)*80, f.r*(1-e*0.5));
+  }
+  for (i=sparks.length-1;i>=0;i--){
+    var s = sparks[i]; s.life -= dt*1.6; s.x += s.vx; s.y += s.vy; s.vy += 0.15;
+    if (s.life<=0){ sparks.splice(i,1); continue; }
+    ctx.fillStyle = 'rgba(200,240,255,'+s.life+')';
+    ctx.beginPath(); ctx.arc(s.x, s.y, 4*s.life, 0, 7); ctx.fill();
+  }
+  if (blessT > 0){
+    ctx.fillStyle = 'rgba(255,213,74,'+ (0.10+0.06*Math.sin(t*6)) +')';
+    ctx.fillRect(0, PLAY_TOP-6, W, FLOOR-PLAY_TOP+40);
+  }
+  drawHUD();
+  if (banner && banner.t > 0){
+    banner.t -= dt;
+    ctx.fillStyle = 'rgba(15,45,70,.85)';
+    roundRect(W/2-210, PLAY_TOP+8, 420, 52, 14); ctx.fill();
+    ctx.fillStyle = '#ffe9a8'; ctx.font = 'bold 24px "Microsoft JhengHei",sans-serif'; ctx.textAlign='center';
+    ctx.fillText(banner.text, W/2, PLAY_TOP+43);
+  }
+}
+requestAnimationFrame(loop);
+
+// ---------- 測試鉤子(?test=1 才掛;Playwright 驗證用,不影響玩家) ----------
+if (location.search.indexOf('test=1') !== -1){
+  window.__tsum = {
+    state: function(){ return { scene:scene, fed:fed, n:tsums.length, queue:spawnQueue, chains:chainCount, mode:modeKey }; },
+    start: function(k){ if(k && MODES[k]){ modeKey=k; M=MODES[k]; } startGame(); },
+    autoChain: function(){
+      // BFS 找一組「同款(含大魚百搭)」相鄰 >= minChain,走正式 collect 路徑
+      for (var i=0;i<tsums.length;i++){
+        var seed = tsums[i];
+        if (seed.t.wild) continue;             // 以非百搭為錨
+        var group = [seed], seen = [seed];
+        var grow = true;
+        while (grow && group.length < 9){
+          grow = false;
+          for (var j=0;j<tsums.length;j++){
+            var c = tsums[j];
+            if (seen.indexOf(c) !== -1) continue;
+            if (c.t !== seed.t && !c.t.wild) continue;
+            var lastT = group[group.length-1];
+            var dx=c.x-lastT.x, dy=c.y-lastT.y, lim=(c.r+lastT.r)*1.35;
+            if (dx*dx+dy*dy <= lim*lim){ group.push(c); seen.push(c); grow = true; break; }
+          }
+        }
+        if (group.length >= M.minChain){ collect(group); return group.length; }
+      }
+      return 0;
+    },
+    win: function(){ fed = M.target - 1; return this.autoChain(); }
+  };
+}
+})();
