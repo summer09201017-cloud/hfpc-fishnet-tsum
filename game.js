@@ -281,10 +281,12 @@ var bgmTimer = null, bgmStep = 0;
 var MELO = [330,392,440,523, 440,392,330,294, 330,440,523,587, 523,440,392,330];
 var BASS = [110,110,147,147, 131,131,110,110, 147,147,165,165, 131,131,110,110];
 function bgmTick(){
-  if (muted || scene !== 'play') return;
+  if (muted) return;
+  // ★ BGM 可聽度修正 0726:原本這裡是 scene !== 'play' 就 return —— 選單/地圖畫面完全不播,
+  //   但玩家一開遊戲看到的就是選單,於是回報「沒有背景音樂」。現在選單/地圖也播。
   var i = bgmStep % 16;
-  blip(BASS[i], 0.26, 'sine', 0.05);
-  if (bgmStep % 2 === 0) blip(MELO[(bgmStep/2)%16|0], 0.22, 'triangle', 0.04);
+  blip(BASS[i], 0.26, 'sine', 0.02);
+  if (bgmStep % 2 === 0) blip(MELO[(bgmStep/2)%16|0], 0.22, 'triangle', 0.35);
   bgmStep++;
 }
 function bgmStart(){ if (bgmTimer) return; bgmTimer = setInterval(bgmTick, 280); }
